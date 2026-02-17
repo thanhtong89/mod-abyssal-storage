@@ -138,55 +138,50 @@ bool AbyssalStorageMgr::ShouldAutoStore(Player* player, ItemTemplate const* item
     return true;
 }
 
+// Send a raw LANG_ADDON packet. The WoW 3.3.5 client splits on '\t':
+//   arg1 (prefix) = everything before first \t
+//   arg2 (body)   = everything after first \t
+// Client fires CHAT_MSG_ADDON event.
+static void SendOnePacket(Player* player, std::string const& msg)
+{
+    WorldPacket data;
+    std::size_t len = msg.length();
+    data.Initialize(SMSG_MESSAGECHAT, 1 + 4 + 8 + 4 + 8 + 4 + 1 + len + 1);
+    data << uint8(CHAT_MSG_WHISPER);
+    data << uint32(LANG_ADDON);
+    data << uint64(0);
+    data << uint32(0);
+    data << uint64(0);
+    data << uint32(len + 1);
+    data << msg;
+    data << uint8(0);
+    player->GetSession()->SendPacket(&data);
+}
+
 void AbyssalStorageMgr::SendAddonMessage(Player* player, std::string const& message)
 {
-    // Split into chunks if message exceeds ~250 bytes (safe limit for addon messages)
-    const size_t MAX_MSG_LEN = 250;
+    // Prefix with "ABYS\t" so client receives arg1="ABYS", arg2=message
+    const size_t MAX_MSG_LEN = 240; // leave room for prefix
+    std::string fullMsg = "ABYS\t" + message;
 
-    if (message.length() <= MAX_MSG_LEN)
+    if (fullMsg.length() <= MAX_MSG_LEN)
     {
-        WorldPacket data;
-        std::size_t len = message.length();
-        data.Initialize(SMSG_MESSAGECHAT, 1 + 4 + 8 + 4 + 8 + 4 + 1 + len + 1);
-        data << uint8(CHAT_MSG_WHISPER);
-        data << uint32(LANG_ADDON);
-        data << uint64(0);
-        data << uint32(0);
-        data << uint64(0);
-        data << uint32(len + 1);
-        data << message;
-        data << uint8(0);
-        player->SendDirectMessage(&data);
+        SendOnePacket(player, fullMsg);
         return;
     }
 
     // For SYNC messages, split by semicolons to create valid chunks
-    // Find prefix (e.g. "ABYS:SYNC:")
-    size_t prefixEnd = message.find(':', 5); // after "ABYS:"
+    size_t prefixEnd = message.find(':', 5);
     if (prefixEnd == std::string::npos)
     {
-        // Not a structured message, just send truncated
-        WorldPacket data;
-        std::string truncated = message.substr(0, MAX_MSG_LEN);
-        std::size_t len = truncated.length();
-        data.Initialize(SMSG_MESSAGECHAT, 1 + 4 + 8 + 4 + 8 + 4 + 1 + len + 1);
-        data << uint8(CHAT_MSG_WHISPER);
-        data << uint32(LANG_ADDON);
-        data << uint64(0);
-        data << uint32(0);
-        data << uint64(0);
-        data << uint32(len + 1);
-        data << truncated;
-        data << uint8(0);
-        player->SendDirectMessage(&data);
+        SendOnePacket(player, ("ABYS\t" + message.substr(0, MAX_MSG_LEN - 5)));
         return;
     }
-    prefixEnd++; // include the ':'
+    prefixEnd++;
 
     std::string prefix = message.substr(0, prefixEnd);
     std::string payload = message.substr(prefixEnd);
 
-    // Split payload by ';' and send in chunks
     std::string chunk = prefix;
     size_t pos = 0;
     while (pos < payload.length())
@@ -204,23 +199,9 @@ void AbyssalStorageMgr::SendAddonMessage(Player* player, std::string const& mess
             pos = nextSep + 1;
         }
 
-        // Check if adding this entry would exceed limit
-        if (chunk.length() > prefix.length() && chunk.length() + 1 + entry.length() > MAX_MSG_LEN)
+        if (chunk.length() > prefix.length() && chunk.length() + 1 + entry.length() + 5 > MAX_MSG_LEN)
         {
-            // Send current chunk
-            WorldPacket data;
-            std::size_t len = chunk.length();
-            data.Initialize(SMSG_MESSAGECHAT, 1 + 4 + 8 + 4 + 8 + 4 + 1 + len + 1);
-            data << uint8(CHAT_MSG_WHISPER);
-            data << uint32(LANG_ADDON);
-            data << uint64(0);
-            data << uint32(0);
-            data << uint64(0);
-            data << uint32(len + 1);
-            data << chunk;
-            data << uint8(0);
-            player->SendDirectMessage(&data);
-
+            SendOnePacket(player, "ABYS\t" + chunk);
             chunk = prefix;
         }
 
@@ -229,22 +210,8 @@ void AbyssalStorageMgr::SendAddonMessage(Player* player, std::string const& mess
         chunk += entry;
     }
 
-    // Send remaining chunk
     if (chunk.length() > prefix.length())
-    {
-        WorldPacket data;
-        std::size_t len = chunk.length();
-        data.Initialize(SMSG_MESSAGECHAT, 1 + 4 + 8 + 4 + 8 + 4 + 1 + len + 1);
-        data << uint8(CHAT_MSG_WHISPER);
-        data << uint32(LANG_ADDON);
-        data << uint64(0);
-        data << uint32(0);
-        data << uint64(0);
-        data << uint32(len + 1);
-        data << chunk;
-        data << uint8(0);
-        player->SendDirectMessage(&data);
-    }
+        SendOnePacket(player, "ABYS\t" + chunk);
 }
 
 void AbyssalStorageMgr::SendFullSync(Player* player)
@@ -254,11 +221,11 @@ void AbyssalStorageMgr::SendFullSync(Player* player)
 
     if (items.empty())
     {
-        SendAddonMessage(player, "ABYS:SYNC:");
+        SendAddonMessage(player, "SYNC:");
         return;
     }
 
-    std::string msg = "ABYS:SYNC:";
+    std::string msg = "SYNC:";
     bool first = true;
     for (auto const& pair : items)
     {
@@ -273,12 +240,12 @@ void AbyssalStorageMgr::SendFullSync(Player* player)
 
 void AbyssalStorageMgr::SendItemUpdate(Player* player, uint32 itemEntry, uint32 count)
 {
-    std::string msg = "ABYS:UPD:" + std::to_string(itemEntry) + "," + std::to_string(count);
+    std::string msg = "UPD:" + std::to_string(itemEntry) + "," + std::to_string(count);
     SendAddonMessage(player, msg);
 }
 
 void AbyssalStorageMgr::SendItemDelete(Player* player, uint32 itemEntry)
 {
-    std::string msg = "ABYS:DEL:" + std::to_string(itemEntry);
+    std::string msg = "DEL:" + std::to_string(itemEntry);
     SendAddonMessage(player, msg);
 }

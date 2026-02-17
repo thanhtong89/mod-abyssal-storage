@@ -7,15 +7,26 @@
 #include <set>
 #include <mutex>
 #include <string>
+#include <vector>
 
 class Player;
 struct ItemTemplate;
+
+struct PendingDeposit
+{
+    uint32 itemEntry;
+    uint32 count;
+};
 
 // Per-player transient state stored via DataMap
 struct AbyssalPlayerData : public DataMap::Base
 {
     bool autoStoreEnabled = true;
+    bool isMaterializing = false; // true while materializing items (suppress auto-deposit)
     std::set<uint32> materializedItems; // item GUIDs currently materialized for crafting
+    std::vector<PendingDeposit> pendingDeposits; // deferred auto-deposits
+    uint32 pendingCrafts = 0;    // remaining crafts in a multi-craft batch
+    uint32 pendingSpellId = 0;   // spell ID for multi-craft batch
 };
 
 AbyssalPlayerData* GetAbyssalData(Player* player);

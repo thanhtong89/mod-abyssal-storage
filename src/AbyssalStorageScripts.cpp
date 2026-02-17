@@ -10,8 +10,25 @@
 #include "ScriptMgr.h"
 #include "Spell.h"
 #include "SpellInfo.h"
+#include "SpellMgr.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include <sstream>
+
+// Build a clickable item link like "|cff1eff00|Hitem:2589:0:0:0:0:0:0:0:0:0|h[Linen Cloth]|h|r"
+static std::string BuildItemLink(uint32 itemEntry)
+{
+    ItemTemplate const* proto = sObjectMgr->GetItemTemplate(itemEntry);
+    if (!proto)
+        return "[Item #" + std::to_string(itemEntry) + "]";
+
+    std::ostringstream ss;
+    ss << "|c";
+    ss << std::hex << ItemQualityColors[proto->Quality] << std::dec;
+    ss << "|Hitem:" << itemEntry << ":0:0:0:0:0:0:0:0:0|h[";
+    ss << proto->Name1 << "]|h|r";
+    return ss.str();
+}
 
 // ============================================================================
 // WorldScript — Config Loading
@@ -38,11 +55,12 @@ public:
     AbyssalStoragePlayerScript() : PlayerScript("AbyssalStoragePlayerScript", {
         PLAYERHOOK_ON_LOGIN,
         PLAYERHOOK_ON_LOGOUT,
+        PLAYERHOOK_ON_UPDATE,
         PLAYERHOOK_ON_STORE_NEW_ITEM,
         PLAYERHOOK_ON_BEFORE_QUEST_COMPLETE
     }) { }
 
-    void OnLogin(Player* player) override
+    void OnPlayerLogin(Player* player) override
     {
         if (!sAbyssalStorageMgr->IsEnabled())
             return;
@@ -52,7 +70,7 @@ public:
         sAbyssalStorageMgr->SendFullSync(player);
     }
 
-    void OnLogout(Player* player) override
+    void OnPlayerLogout(Player* player) override
     {
         if (!sAbyssalStorageMgr->IsEnabled())
             return;
@@ -92,6 +110,10 @@ public:
         if (!data || !data->autoStoreEnabled)
             return;
 
+        // Don't auto-store items being materialized from vault
+        if (data->isMaterializing)
+            return;
+
         // Don't auto-store materialized items
         if (data->materializedItems.count(item->GetGUID().GetCounter()))
             return;
@@ -100,15 +122,39 @@ public:
         if (!sAbyssalStorageMgr->ShouldAutoStore(player, itemTemplate))
             return;
 
+        // Defer the deposit — destroying items inside this hook crashes the server
+        data->pendingDeposits.push_back({ item->GetEntry(), item->GetCount() });
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
+    {
+        if (!sAbyssalStorageMgr->IsEnabled() || !player)
+            return;
+
+        AbyssalPlayerData* data = GetAbyssalData(player);
+        if (!data || data->pendingDeposits.empty())
+            return;
+
+        // Move pending list out so we don't re-enter if DestroyItemCount triggers hooks
+        std::vector<PendingDeposit> deposits = std::move(data->pendingDeposits);
+        data->pendingDeposits.clear();
+
         uint32 accountId = player->GetSession()->GetAccountId();
-        uint32 itemEntry = item->GetEntry();
-        uint32 itemCount = item->GetCount();
 
-        sAbyssalStorageMgr->DepositItem(accountId, itemEntry, itemCount);
-        player->DestroyItemCount(itemEntry, itemCount, true);
+        for (auto const& dep : deposits)
+        {
+            // Verify the player still has the items (they may have been used/moved)
+            uint32 playerHas = player->GetItemCount(dep.itemEntry);
+            uint32 toDeposit = std::min(dep.count, playerHas);
+            if (toDeposit == 0)
+                continue;
 
-        uint32 newTotal = sAbyssalStorageMgr->GetItemCount(accountId, itemEntry);
-        sAbyssalStorageMgr->SendItemUpdate(player, itemEntry, newTotal);
+            player->DestroyItemCount(dep.itemEntry, toDeposit, true);
+            sAbyssalStorageMgr->DepositItem(accountId, dep.itemEntry, toDeposit);
+
+            uint32 newTotal = sAbyssalStorageMgr->GetItemCount(accountId, dep.itemEntry);
+            sAbyssalStorageMgr->SendItemUpdate(player, dep.itemEntry, newTotal);
+        }
     }
 
     bool OnPlayerBeforeQuestComplete(Player* player, uint32 questId) override
@@ -122,6 +168,9 @@ public:
 
         uint32 accountId = player->GetSession()->GetAccountId();
         AbyssalPlayerData* data = GetAbyssalData(player);
+
+        if (data)
+            data->isMaterializing = true;
 
         for (uint8 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
         {
@@ -141,7 +190,6 @@ public:
 
             uint32 toMaterialize = std::min(deficit, vaultCount);
 
-            // Try to add items to player inventory
             ItemPosCountVec dest;
             InventoryResult result = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, reqItem, toMaterialize);
             if (result != EQUIP_ERR_OK)
@@ -157,6 +205,9 @@ public:
             sAbyssalStorageMgr->WithdrawItem(accountId, reqItem, toMaterialize);
             sAbyssalStorageMgr->SendItemUpdate(player, reqItem, sAbyssalStorageMgr->GetItemCount(accountId, reqItem));
         }
+
+        if (data)
+            data->isMaterializing = false;
 
         return true;
     }
@@ -208,7 +259,7 @@ public:
         if (!data)
             return;
 
-        // For each reagent, check if player is short and vault can cover
+        // First pass: verify vault can cover all deficits before materializing anything
         for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
         {
             int32 reagentEntry = spellInfo->Reagent[i];
@@ -224,16 +275,29 @@ public:
             uint32 vaultCount = sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry);
 
             if (vaultCount < deficit)
-            {
-                // Not enough even with vault
-                return;
-            }
+                return; // not enough even with vault
+        }
 
-            // Materialize the deficit
+        // Second pass: materialize deficits
+        data->isMaterializing = true;
+        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            int32 reagentEntry = spellInfo->Reagent[i];
+            uint32 reagentCount = spellInfo->ReagentCount[i];
+            if (reagentEntry <= 0 || reagentCount == 0)
+                continue;
+
+            uint32 playerHas = player->GetItemCount(reagentEntry);
+            if (playerHas >= reagentCount)
+                continue;
+
+            uint32 deficit = reagentCount - playerHas;
+
             ItemPosCountVec dest;
             InventoryResult invResult = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, reagentEntry, deficit);
             if (invResult != EQUIP_ERR_OK)
             {
+                data->isMaterializing = false;
                 res = SPELL_FAILED_DONT_REPORT;
                 ChatHandler(player->GetSession()).SendSysMessage("Abyssal Storage: Not enough bag space to materialize crafting reagents.");
                 return;
@@ -245,9 +309,10 @@ public:
 
             sAbyssalStorageMgr->WithdrawItem(accountId, reagentEntry, deficit);
         }
+        data->isMaterializing = false;
     }
 
-    void OnSpellCast(Spell* /*spell*/, Unit* caster, SpellInfo const* /*spellInfo*/, bool /*skipCheck*/) override
+    void OnSpellCast(Spell* /*spell*/, Unit* caster, SpellInfo const* spellInfo, bool /*skipCheck*/) override
     {
         if (!sAbyssalStorageMgr->IsEnabled())
             return;
@@ -260,10 +325,22 @@ public:
         if (!data || data->materializedItems.empty())
             return;
 
+        // Multi-craft: if more crafts remain, queue the next one instead of re-vaulting
+        if (data->pendingCrafts > 0 && data->pendingSpellId == spellInfo->Id)
+        {
+            data->pendingCrafts--;
+            if (data->pendingCrafts > 0)
+            {
+                player->CastSpell(player, data->pendingSpellId, false);
+                return; // don't re-vault yet
+            }
+            // Last craft done — fall through to re-vault leftovers
+        }
+
         uint32 accountId = player->GetSession()->GetAccountId();
 
         // Re-vault any materialized items that are still in inventory (leftovers)
-        std::set<uint32> toRemove;
+        data->isMaterializing = true;
         for (uint32 guid : data->materializedItems)
         {
             Item* item = player->GetItemByGuid(ObjectGuid(HighGuid::Item, guid));
@@ -275,17 +352,20 @@ public:
                 sAbyssalStorageMgr->DepositItem(accountId, entry, count);
                 sAbyssalStorageMgr->SendItemUpdate(player, entry, sAbyssalStorageMgr->GetItemCount(accountId, entry));
             }
-            toRemove.insert(guid);
         }
-
-        for (uint32 guid : toRemove)
-            data->materializedItems.erase(guid);
+        data->materializedItems.clear();
+        data->isMaterializing = false;
+        data->pendingCrafts = 0;
+        data->pendingSpellId = 0;
+        data->autoStoreEnabled = true;
     }
 };
 
 // ============================================================================
 // CommandScript — Player Commands
 // ============================================================================
+
+using namespace Acore::ChatCommands;
 
 class AbyssalStorageCommandScript : public CommandScript
 {
@@ -299,6 +379,7 @@ public:
             { "withdraw", HandleWithdrawCommand,  SEC_PLAYER, Console::No },
             { "deposit",  HandleDepositCommand,   SEC_PLAYER, Console::No },
             { "sync",     HandleSyncCommand,      SEC_PLAYER, Console::No },
+            { "craft",    HandleCraftCommand,      SEC_PLAYER, Console::No },
         };
         static ChatCommandTable commandTable =
         {
@@ -337,6 +418,12 @@ public:
             return true;
         }
 
+        // Disable auto-store BEFORE creating items, otherwise OnPlayerStoreNewItem
+        // will immediately re-deposit them back into the vault
+        AbyssalPlayerData* data = GetAbyssalData(player);
+        if (data)
+            data->autoStoreEnabled = false;
+
         // Add items to player in stacks respecting max stack size
         uint32 remaining = count;
         while (remaining > 0)
@@ -359,17 +446,13 @@ public:
         uint32 withdrawn = count - remaining;
         if (withdrawn > 0)
         {
-            AbyssalPlayerData* data = GetAbyssalData(player);
-            if (data)
-                data->autoStoreEnabled = false;
-
             uint32 newCount = sAbyssalStorageMgr->GetItemCount(accountId, itemEntry);
             if (newCount > 0)
                 sAbyssalStorageMgr->SendItemUpdate(player, itemEntry, newCount);
             else
                 sAbyssalStorageMgr->SendItemDelete(player, itemEntry);
 
-            handler->PSendSysMessage("Abyssal Storage: Withdrew %u x%u.", itemEntry, withdrawn);
+            handler->PSendSysMessage("Abyssal Storage: Withdrew {} x{}.", BuildItemLink(itemEntry), withdrawn);
         }
 
         return true;
@@ -432,7 +515,7 @@ public:
             data->autoStoreEnabled = true;
 
         sAbyssalStorageMgr->SendFullSync(player);
-        handler->PSendSysMessage("Abyssal Storage: Deposited %u item stacks.", depositedCount);
+        handler->PSendSysMessage("Abyssal Storage: Deposited {} item stacks.", depositedCount);
 
         return true;
     }
@@ -448,6 +531,134 @@ public:
 
         sAbyssalStorageMgr->SendFullSync(player);
         handler->SendSysMessage("Abyssal Storage: Sync complete.");
+        return true;
+    }
+
+    // .abs craft <spellId> [count]
+    // Materializes reagents from vault and casts the crafting spell
+    static bool HandleCraftCommand(ChatHandler* handler, uint32 spellId, Optional<uint32> optCount)
+    {
+        if (!sAbyssalStorageMgr->IsEnabled())
+            return false;
+
+        Player* player = handler->GetSession()->GetPlayer();
+        if (!player)
+            return false;
+
+        SpellInfo const* spellInfo = sSpellMgr->GetSpellInfo(spellId);
+        if (!spellInfo)
+        {
+            handler->SendSysMessage("Abyssal Storage: Invalid spell.");
+            return true;
+        }
+
+        // Verify spell has reagents
+        bool hasReagents = false;
+        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            if (spellInfo->Reagent[i] > 0 && spellInfo->ReagentCount[i] > 0)
+            {
+                hasReagents = true;
+                break;
+            }
+        }
+
+        if (!hasReagents)
+        {
+            handler->SendSysMessage("Abyssal Storage: Spell has no reagents.");
+            return true;
+        }
+
+        uint32 accountId = player->GetSession()->GetAccountId();
+        uint32 craftCount = optCount.value_or(1);
+        if (craftCount == 0)
+            craftCount = 1;
+
+        // Compute max possible crafts from inventory + vault
+        uint32 maxCrafts = craftCount;
+        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            int32 reagentEntry = spellInfo->Reagent[i];
+            uint32 reagentCount = spellInfo->ReagentCount[i];
+            if (reagentEntry <= 0 || reagentCount == 0)
+                continue;
+
+            uint32 playerHas = player->GetItemCount(reagentEntry);
+            uint32 vaultHas = sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry);
+            uint32 total = playerHas + vaultHas;
+            uint32 possible = total / reagentCount;
+            maxCrafts = std::min(maxCrafts, possible);
+        }
+
+        if (maxCrafts == 0)
+        {
+            handler->SendSysMessage("Abyssal Storage: Not enough reagents.");
+            return true;
+        }
+
+        craftCount = std::min(craftCount, maxCrafts);
+
+        AbyssalPlayerData* data = GetAbyssalData(player);
+        if (data)
+            data->isMaterializing = true;
+
+        // Materialize all reagents needed for craftCount crafts
+        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            int32 reagentEntry = spellInfo->Reagent[i];
+            uint32 reagentCount = spellInfo->ReagentCount[i];
+            if (reagentEntry <= 0 || reagentCount == 0)
+                continue;
+
+            uint32 totalNeeded = reagentCount * craftCount;
+            uint32 playerHas = player->GetItemCount(reagentEntry);
+            if (playerHas >= totalNeeded)
+                continue;
+
+            uint32 deficit = totalNeeded - playerHas;
+            uint32 vaultHas = sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry);
+            uint32 toWithdraw = std::min(deficit, vaultHas);
+
+            if (toWithdraw == 0)
+                continue;
+
+            // Withdraw in stacks
+            ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(reagentEntry);
+            uint32 remaining = toWithdraw;
+            while (remaining > 0)
+            {
+                uint32 stackSize = itemTemplate ? std::min(remaining, itemTemplate->GetMaxStackSize()) : remaining;
+                ItemPosCountVec dest;
+                InventoryResult invResult = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, reagentEntry, stackSize);
+                if (invResult != EQUIP_ERR_OK)
+                {
+                    handler->SendSysMessage("Abyssal Storage: Not enough bag space for reagents.");
+                    if (data)
+                        data->isMaterializing = false;
+                    return true;
+                }
+
+                Item* newItem = player->StoreNewItem(dest, reagentEntry, true);
+                if (newItem && data)
+                    data->materializedItems.insert(newItem->GetGUID().GetCounter());
+                remaining -= stackSize;
+            }
+
+            sAbyssalStorageMgr->WithdrawItem(accountId, reagentEntry, toWithdraw);
+            sAbyssalStorageMgr->SendItemUpdate(player, reagentEntry, sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry));
+        }
+
+        if (data)
+        {
+            data->isMaterializing = false;
+            data->autoStoreEnabled = false; // prevent re-deposit of withdrawn reagents
+            data->pendingCrafts = craftCount;  // OnSpellCast will decrement and re-cast
+            data->pendingSpellId = spellId;
+        }
+
+        // Cast once — OnSpellCast will chain the remaining crafts
+        player->CastSpell(player, spellId, false);
+
         return true;
     }
 };

@@ -102,14 +102,24 @@ local gridArea = CreateFrame("Frame", nil, frame)
 gridArea:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PADDING, -gridTop)
 gridArea:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(FRAME_PADDING + SCROLL_WIDTH), FRAME_PADDING)
 
--- Scroll bar
-local scrollBar = CreateFrame("Slider", "AbyssalStorageScrollBar", frame, "UIPanelScrollBarTemplate")
+-- Scroll bar (plain Slider, no template)
+local scrollBar = CreateFrame("Slider", "AbyssalStorageScrollBar", frame)
 scrollBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -(FRAME_PADDING + 2), -(gridTop + 16))
 scrollBar:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(FRAME_PADDING + 2), FRAME_PADDING + 16)
+scrollBar:SetWidth(SCROLL_WIDTH)
 scrollBar:SetMinMaxValues(0, 0)
 scrollBar:SetValueStep(1)
 scrollBar:SetValue(0)
-scrollBar:SetWidth(SCROLL_WIDTH)
+scrollBar:SetOrientation("VERTICAL")
+
+local scrollBg = scrollBar:CreateTexture(nil, "BACKGROUND")
+scrollBg:SetAllPoints()
+scrollBg:SetTexture(0, 0, 0, 0.3)
+
+local scrollThumb = scrollBar:CreateTexture(nil, "OVERLAY")
+scrollThumb:SetTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+scrollThumb:SetSize(SCROLL_WIDTH + 4, 24)
+scrollBar:SetThumbTexture(scrollThumb)
 
 scrollBar:SetScript("OnValueChanged", function(self, value)
     AbyssalStorage:UpdateGrid()
@@ -326,55 +336,169 @@ end)
 -- TradeSkill Frame Hooks — Show vault reagents, enable Create button
 -- ============================================================================
 
-local function HookTradeSkill()
-    if not TradeSkillFrame then return end
+-- Check if a recipe needs vault materials (player inventory alone is insufficient)
+local function NeedsVaultMaterials(id)
+    local numReagents = GetTradeSkillNumReagents(id)
+    for i = 1, numReagents do
+        local _, _, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(id, i)
+        if playerReagentCount < reagentCount then
+            return true
+        end
+    end
+    return false
+end
 
-    -- Hook selection to update reagent counts and Create button state
+-- Get the spell ID for a tradeskill recipe index
+local function GetTradeSkillSpellId(id)
+    local link = GetTradeSkillRecipeLink(id)
+    if link then
+        local spellId = link:match("enchant:(%d+)")
+        if spellId then return tonumber(spellId) end
+    end
+    return nil
+end
+
+-- Compute how many times a recipe can be crafted with inventory + vault
+local function GetMaxCraftsWithVault(id)
+    local numReagents = GetTradeSkillNumReagents(id)
+    local maxCrafts = math.huge
+    local canCraftWithVault = true
+
+    for i = 1, numReagents do
+        local reagentName, reagentTexture, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(id, i)
+        local reagentLink = GetTradeSkillReagentItemLink(id, i)
+        local reagentEntry = AbyssalStorage:EntryFromLink(reagentLink)
+
+        local totalCount = playerReagentCount
+        if reagentEntry then
+            totalCount = totalCount + AbyssalStorage:GetItemCount(reagentEntry)
+        end
+
+        if totalCount < reagentCount then
+            canCraftWithVault = false
+            maxCrafts = 0
+        else
+            local craftsFromThis = math.floor(totalCount / reagentCount)
+            maxCrafts = math.min(maxCrafts, craftsFromThis)
+        end
+    end
+
+    if maxCrafts == math.huge then maxCrafts = 0 end
+    return canCraftWithVault, maxCrafts
+end
+
+local tradeSkillHooked = false
+
+local function HookTradeSkill()
+    if not TradeSkillFrame or tradeSkillHooked then return end
+    tradeSkillHooked = true
+
+    -- Hook selection to update reagent counts, Create and Create All buttons
     hooksecurefunc("TradeSkillFrame_SetSelection", function(id)
         if not TradeSkillFrame:IsVisible() then return end
 
         local numReagents = GetTradeSkillNumReagents(id)
-        local canCraftWithVault = true
+        local canCraftWithVault, maxCrafts = GetMaxCraftsWithVault(id)
 
+        -- Update reagent count displays to show vault amounts
         for i = 1, numReagents do
-            local reagentName, reagentTexture, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(id, i)
+            local _, _, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(id, i)
             local reagentLink = GetTradeSkillReagentItemLink(id, i)
             local reagentEntry = AbyssalStorage:EntryFromLink(reagentLink)
 
             if reagentEntry then
                 local vaultCount = AbyssalStorage:GetItemCount(reagentEntry)
-                local totalCount = playerReagentCount + vaultCount
-
-                if totalCount < reagentCount then
-                    canCraftWithVault = false
-                end
-
-                -- Update the reagent count text to show combined total
-                local reagentButton = _G["TradeSkillReagent" .. i]
-                if reagentButton then
+                if vaultCount > 0 then
+                    local totalCount = playerReagentCount + vaultCount
                     local countLabel = _G["TradeSkillReagent" .. i .. "Count"]
-                    if countLabel and vaultCount > 0 then
+                    if countLabel then
                         if totalCount >= reagentCount then
                             countLabel:SetText(playerReagentCount .. "(+" .. vaultCount .. ")/" .. reagentCount)
-                            countLabel:SetTextColor(1, 1, 1) -- white when fulfilled
+                            countLabel:SetTextColor(1, 1, 1)
                         else
                             countLabel:SetText(playerReagentCount .. "(+" .. vaultCount .. ")/" .. reagentCount)
-                            countLabel:SetTextColor(1, 0.2, 0.2) -- red when still short
+                            countLabel:SetTextColor(1, 0.2, 0.2)
                         end
                     end
-                end
-            else
-                if playerReagentCount < reagentCount then
-                    canCraftWithVault = false
                 end
             end
         end
 
-        -- Enable the Create button if vault covers the gap
-        if canCraftWithVault and TradeSkillCreateButton then
-            TradeSkillCreateButton:Enable()
+        -- Enable Create / Create All buttons if vault covers the gap
+        if canCraftWithVault then
+            if TradeSkillCreateButton then
+                TradeSkillCreateButton:Enable()
+            end
+            if TradeSkillCreateAllButton then
+                TradeSkillCreateAllButton:Enable()
+            end
         end
     end)
+
+    -- Suppress "Missing Reagent" error when vault covers the gap
+    -- We hook PreClick to set a flag, then filter UIErrorsFrame
+    local suppressErrors = false
+    local originalOnEvent = UIErrorsFrame:GetScript("OnEvent")
+    UIErrorsFrame:SetScript("OnEvent", function(self, event, msg, ...)
+        if suppressErrors and event == "UI_ERROR_MESSAGE" then
+            return -- swallow the error
+        end
+        if originalOnEvent then
+            return originalOnEvent(self, event, msg, ...)
+        end
+    end)
+
+    -- Hook Create button to use .abs craft when vault materials are needed
+    if TradeSkillCreateButton then
+        TradeSkillCreateButton:HookScript("PreClick", function(self)
+            local id = TradeSkillFrame.selectedSkill
+            if id and NeedsVaultMaterials(id) then
+                suppressErrors = true
+            end
+        end)
+        TradeSkillCreateButton:HookScript("PostClick", function(self)
+            if not suppressErrors then return end
+            suppressErrors = false
+
+            local id = TradeSkillFrame.selectedSkill
+            if not id then return end
+            if not NeedsVaultMaterials(id) then return end
+
+            local spellId = GetTradeSkillSpellId(id)
+            if not spellId then return end
+
+            local count = TradeSkillInputBox and TradeSkillInputBox:GetNumber() or 1
+            if count < 1 then count = 1 end
+
+            AbyssalStorage:SendCommand("abs craft " .. spellId .. " " .. count)
+        end)
+    end
+
+    -- Hook Create All button
+    if TradeSkillCreateAllButton then
+        TradeSkillCreateAllButton:HookScript("PreClick", function(self)
+            local id = TradeSkillFrame.selectedSkill
+            if id and NeedsVaultMaterials(id) then
+                suppressErrors = true
+            end
+        end)
+        TradeSkillCreateAllButton:HookScript("PostClick", function(self)
+            if not suppressErrors then return end
+            suppressErrors = false
+
+            local id = TradeSkillFrame.selectedSkill
+            if not id then return end
+            if not NeedsVaultMaterials(id) then return end
+
+            local spellId = GetTradeSkillSpellId(id)
+            if not spellId then return end
+
+            local _, maxCrafts = GetMaxCraftsWithVault(id)
+            if maxCrafts < 1 then return end
+
+            AbyssalStorage:SendCommand("abs craft " .. spellId .. " " .. maxCrafts)
+        end)
+    end
 end
 
 -- Hook TradeSkillFrame when it loads (it's loaded on demand)
@@ -401,7 +525,7 @@ AbyssalStorageFrame:SetScript("OnShow", function(self)
         GetItemInfo(entry)
     end
     -- Slight delay to let item info queries return
-    SetTimer(0.5, function()
+    AbyssalStorage.SetTimer(0.5, function()
         AbyssalStorage:UpdateUI()
     end)
     AbyssalStorage:UpdateUI()

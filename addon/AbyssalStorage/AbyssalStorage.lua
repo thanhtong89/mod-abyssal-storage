@@ -32,12 +32,12 @@ timerFrame:SetScript("OnUpdate", function(self, elapsed)
 end)
 timerFrame:Hide()
 
-local function SetTimer(delay, callback)
+function AbyssalStorage.SetTimer(delay, callback)
     table.insert(activeTimers, { remaining = delay, callback = callback })
     timerFrame:Show()
 end
 
-local function CancelTimers()
+function AbyssalStorage.CancelTimers()
     wipe(activeTimers)
     timerFrame:Hide()
 end
@@ -77,17 +77,14 @@ end
 -- Message Parsing
 -- ============================================================================
 
+-- msg is the body (arg2 from CHAT_MSG_ADDON), e.g. "SYNC:entry,count;..."
 function AbyssalStorage:HandleMessage(msg)
-    if not msg or msg:sub(1, 4) ~= self.PREFIX then
-        return false
-    end
+    if not msg then return end
 
-    local cmd = msg:match("^ABYS:(%u+):")
-    local payload = msg:match("^ABYS:%u+:(.*)")
+    local cmd = msg:match("^(%u+):")
+    local payload = msg:match("^%u+:(.*)")
 
-    if not cmd then
-        return true
-    end
+    if not cmd then return end
 
     if cmd == "SYNC" then
         self:HandleSync(payload)
@@ -98,8 +95,6 @@ function AbyssalStorage:HandleMessage(msg)
     elseif cmd == "ERR" then
         self:HandleError(payload)
     end
-
-    return true
 end
 
 function AbyssalStorage:HandleSync(payload)
@@ -125,8 +120,8 @@ function AbyssalStorage:HandleSync(payload)
     end
 
     -- Debounce UI update for multi-packet syncs
-    CancelTimers()
-    SetTimer(0.1, function()
+    AbyssalStorage.CancelTimers()
+    AbyssalStorage.SetTimer(0.1, function()
         AbyssalStorage._syncActive = false
         if AbyssalStorage.UpdateUI then AbyssalStorage:UpdateUI() end
     end)
@@ -167,13 +162,14 @@ end
 -- ============================================================================
 
 local eventFrame = CreateFrame("Frame", "AbyssalStorageEventFrame", UIParent)
-eventFrame:RegisterEvent("CHAT_MSG_WHISPER")
+eventFrame:RegisterEvent("CHAT_MSG_ADDON")
 eventFrame:RegisterEvent("PLAYER_LOGIN")
 
-eventFrame:SetScript("OnEvent", function(self, event, msg, ...)
-    if event == "CHAT_MSG_WHISPER" then
-        if msg and msg:sub(1, 4) == AbyssalStorage.PREFIX then
-            AbyssalStorage:HandleMessage(msg)
+eventFrame:SetScript("OnEvent", function(self, event, arg1, arg2, ...)
+    if event == "CHAT_MSG_ADDON" then
+        -- arg1 = prefix ("ABYS"), arg2 = message body
+        if arg1 == AbyssalStorage.PREFIX then
+            AbyssalStorage:HandleMessage(arg2)
         end
     elseif event == "PLAYER_LOGIN" then
         -- Server sends sync on login automatically
