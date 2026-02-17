@@ -73,6 +73,15 @@ title:SetText("Abyssal Storage")
 local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
 closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
 
+-- Deposit All button
+local depositBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+depositBtn:SetSize(80, 22)
+depositBtn:SetPoint("RIGHT", closeBtn, "LEFT", -2, 0)
+depositBtn:SetText("Deposit All")
+depositBtn:SetScript("OnClick", function()
+    AbyssalStorage:Deposit()
+end)
+
 -- ============================================================================
 -- Search Bar
 -- ============================================================================
@@ -181,12 +190,23 @@ local function CreateCell(index)
         GameTooltip:Hide()
     end)
 
-    -- Click — withdraw dialog
+    -- Click — withdraw dialog; Shift-click — stack split
     cell:SetScript("OnClick", function(self)
         if self.itemEntry and self.itemCount then
-            AbyssalStorage:ShowWithdrawDialog(self.itemEntry, self.itemCount)
+            if IsShiftKeyDown() and self.itemCount > 1 then
+                OpenStackSplitFrame(self.itemCount, self, "BOTTOMLEFT", "TOPLEFT")
+            else
+                AbyssalStorage:ShowWithdrawDialog(self.itemEntry, self.itemCount)
+            end
         end
     end)
+
+    -- Callback invoked by StackSplitFrame when user confirms a split amount
+    cell.SplitStack = function(self, amount)
+        if self.itemEntry and amount and amount > 0 then
+            AbyssalStorage:ShowWithdrawDialog(self.itemEntry, amount)
+        end
+    end
 
     cell.itemEntry = nil
     cell.itemCount = nil
@@ -275,59 +295,20 @@ function AbyssalStorage:UpdateUI()
 end
 
 -- ============================================================================
--- Bag Portrait Hook — Right-Click Menu
+-- Show/Hide with Bags (Shift+B)
 -- ============================================================================
 
-local function CreateBagDropdown()
-    local menu = CreateFrame("Frame", "AbyssalStorageBagMenu", UIParent, "UIDropDownMenuTemplate")
-    UIDropDownMenu_Initialize(menu, function(self, level)
-        local info = UIDropDownMenu_CreateInfo()
-
-        info.text = "Show Abyssal Storage"
-        info.func = function()
-            if AbyssalStorageFrame:IsShown() then
-                AbyssalStorageFrame:Hide()
-            else
-                AbyssalStorageFrame:Show()
-                AbyssalStorage:UpdateUI()
-            end
-        end
-        info.notCheckable = true
-        UIDropDownMenu_AddButton(info)
-
-        info.text = "Put All in Abyssal Storage"
-        info.func = function()
-            AbyssalStorage:Deposit()
-        end
-        info.notCheckable = true
-        UIDropDownMenu_AddButton(info)
-    end, "MENU")
-    return menu
-end
-
-local bagMenu
-
-local function HookBagPortrait()
-    local portrait = MainMenuBarBackpackButton
-    if not portrait then return end
-
-    portrait:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-    portrait:HookScript("OnClick", function(self, button)
-        if button == "RightButton" then
-            if not bagMenu then
-                bagMenu = CreateBagDropdown()
-            end
-            ToggleDropDownMenu(1, nil, bagMenu, self, 0, 0)
-        end
-    end)
-end
-
--- Hook after UI is loaded
 local hookFrame = CreateFrame("Frame")
 hookFrame:RegisterEvent("PLAYER_ENTERING_WORLD")
 hookFrame:SetScript("OnEvent", function(self, event)
     if event == "PLAYER_ENTERING_WORLD" then
-        HookBagPortrait()
+        hooksecurefunc("OpenAllBags", function()
+            AbyssalStorageFrame:Show()
+            AbyssalStorage:UpdateUI()
+        end)
+        hooksecurefunc("CloseAllBags", function()
+            AbyssalStorageFrame:Hide()
+        end)
         self:UnregisterEvent("PLAYER_ENTERING_WORLD")
     end
 end)

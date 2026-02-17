@@ -129,7 +129,7 @@ bool AbyssalStorageMgr::ShouldAutoStore(Player* player, ItemTemplate const* item
     if (!itemTemplate)
         return false;
 
-    if (itemTemplate->Class != ITEM_CLASS_TRADE_GOODS)
+    if (itemTemplate->Class != ITEM_CLASS_TRADE_GOODS && itemTemplate->Class != ITEM_CLASS_GEM)
         return false;
 
     if (player->HasQuestForItem(itemTemplate->ItemId))
