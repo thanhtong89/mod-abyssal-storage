@@ -468,9 +468,11 @@ public:
             return false;
 
         uint32 accountId = player->GetSession()->GetAccountId();
-        uint32 depositedCount = 0;
 
-        // Scan all inventory slots for trade goods
+        // Collect totals first — DestroyItemCount searches the whole inventory,
+        // so destroying during iteration can skip stacks of the same item
+        std::unordered_map<uint32, uint32> toDeposit; // itemEntry -> totalCount
+
         for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
         {
             if (Bag* pBag = player->GetBagByPos(bag))
@@ -482,13 +484,7 @@ public:
                         continue;
 
                     if (sAbyssalStorageMgr->ShouldAutoStore(player, item->GetTemplate()))
-                    {
-                        uint32 entry = item->GetEntry();
-                        uint32 count = item->GetCount();
-                        sAbyssalStorageMgr->DepositItem(accountId, entry, count);
-                        player->DestroyItemCount(entry, count, true);
-                        ++depositedCount;
-                    }
+                        toDeposit[item->GetEntry()] += item->GetCount();
                 }
             }
         }
@@ -501,13 +497,16 @@ public:
                 continue;
 
             if (sAbyssalStorageMgr->ShouldAutoStore(player, item->GetTemplate()))
-            {
-                uint32 entry = item->GetEntry();
-                uint32 count = item->GetCount();
-                sAbyssalStorageMgr->DepositItem(accountId, entry, count);
-                player->DestroyItemCount(entry, count, true);
-                ++depositedCount;
-            }
+                toDeposit[item->GetEntry()] += item->GetCount();
+        }
+
+        // Now destroy and deposit in one pass per item entry
+        uint32 depositedCount = 0;
+        for (auto const& [entry, count] : toDeposit)
+        {
+            player->DestroyItemCount(entry, count, true);
+            sAbyssalStorageMgr->DepositItem(accountId, entry, count);
+            ++depositedCount;
         }
 
         AbyssalPlayerData* data = GetAbyssalData(player);
@@ -574,8 +573,17 @@ public:
         if (craftCount == 0)
             craftCount = 1;
 
-        // Compute max possible crafts from inventory + vault
-        uint32 maxCrafts = craftCount;
+        // Gather reagent info: what the player has, what the vault has, per-craft need
+        struct ReagentInfo
+        {
+            int32  entry;
+            uint32 perCraft;
+            uint32 playerHas;
+            uint32 vaultHas;
+            uint32 maxStack;
+        };
+        std::vector<ReagentInfo> reagents;
+
         for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
         {
             int32 reagentEntry = spellInfo->Reagent[i];
@@ -585,8 +593,71 @@ public:
 
             uint32 playerHas = player->GetItemCount(reagentEntry);
             uint32 vaultHas = sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry);
-            uint32 total = playerHas + vaultHas;
-            uint32 possible = total / reagentCount;
+
+            if (playerHas + vaultHas < reagentCount)
+            {
+                handler->SendSysMessage("Abyssal Storage: Not enough reagents.");
+                return true;
+            }
+
+            ItemTemplate const* tmpl = sObjectMgr->GetItemTemplate(reagentEntry);
+            uint32 maxStack = tmpl ? tmpl->GetMaxStackSize() : 1;
+
+            reagents.push_back({ reagentEntry, reagentCount, playerHas, vaultHas, maxStack });
+        }
+
+        // Count free bag slots
+        uint32 freeSlots = 0;
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+        {
+            if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                freeSlots++;
+        }
+        for (uint8 bag = INVENTORY_SLOT_BAG_START; bag < INVENTORY_SLOT_BAG_END; ++bag)
+        {
+            if (Bag* pBag = player->GetBagByPos(bag))
+            {
+                for (uint8 slot = 0; slot < pBag->GetBagSize(); ++slot)
+                {
+                    if (!pBag->GetItemByPos(slot))
+                        freeSlots++;
+                }
+            }
+        }
+
+        // Count how many distinct reagents need vault withdrawal
+        uint32 vaultReagentSlots = 0;
+        for (auto const& r : reagents)
+        {
+            if (r.playerHas < r.perCraft)
+                vaultReagentSlots++;
+        }
+
+        // Need: 1 slot per vault reagent type + 1 for the crafted product
+        if (freeSlots < vaultReagentSlots + 1)
+        {
+            handler->SendSysMessage("Abyssal Storage: Not enough bag space (need room for reagents + product).");
+            return true;
+        }
+
+        // Cap craft count by total available reagents (inventory + vault)
+        uint32 maxCrafts = craftCount;
+        for (auto const& r : reagents)
+        {
+            uint32 possible = (r.playerHas + r.vaultHas) / r.perCraft;
+            maxCrafts = std::min(maxCrafts, possible);
+        }
+
+        // Cap further: each vault reagent gets at most 1 max-stack of bag space,
+        // so the amount we can withdraw is limited
+        for (auto const& r : reagents)
+        {
+            if (r.playerHas >= r.perCraft * maxCrafts)
+                continue; // inventory alone covers this reagent for maxCrafts
+
+            // Available in bags = what player already has + up to 1 max stack from vault
+            uint32 availableInBags = r.playerHas + std::min(r.vaultHas, r.maxStack);
+            uint32 possible = availableInBags / r.perCraft;
             maxCrafts = std::min(maxCrafts, possible);
         }
 
@@ -602,50 +673,34 @@ public:
         if (data)
             data->isMaterializing = true;
 
-        // Materialize all reagents needed for craftCount crafts
-        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        // Materialize reagents needed for craftCount crafts (at most 1 stack per type)
+        for (auto const& r : reagents)
         {
-            int32 reagentEntry = spellInfo->Reagent[i];
-            uint32 reagentCount = spellInfo->ReagentCount[i];
-            if (reagentEntry <= 0 || reagentCount == 0)
+            uint32 totalNeeded = r.perCraft * craftCount;
+            if (r.playerHas >= totalNeeded)
                 continue;
 
-            uint32 totalNeeded = reagentCount * craftCount;
-            uint32 playerHas = player->GetItemCount(reagentEntry);
-            if (playerHas >= totalNeeded)
-                continue;
-
-            uint32 deficit = totalNeeded - playerHas;
-            uint32 vaultHas = sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry);
-            uint32 toWithdraw = std::min(deficit, vaultHas);
-
+            uint32 deficit = totalNeeded - r.playerHas;
+            uint32 toWithdraw = std::min(deficit, r.vaultHas);
             if (toWithdraw == 0)
                 continue;
 
-            // Withdraw in stacks
-            ItemTemplate const* itemTemplate = sObjectMgr->GetItemTemplate(reagentEntry);
-            uint32 remaining = toWithdraw;
-            while (remaining > 0)
+            ItemPosCountVec dest;
+            InventoryResult invResult = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, r.entry, toWithdraw);
+            if (invResult != EQUIP_ERR_OK)
             {
-                uint32 stackSize = itemTemplate ? std::min(remaining, itemTemplate->GetMaxStackSize()) : remaining;
-                ItemPosCountVec dest;
-                InventoryResult invResult = player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, reagentEntry, stackSize);
-                if (invResult != EQUIP_ERR_OK)
-                {
-                    handler->SendSysMessage("Abyssal Storage: Not enough bag space for reagents.");
-                    if (data)
-                        data->isMaterializing = false;
-                    return true;
-                }
-
-                Item* newItem = player->StoreNewItem(dest, reagentEntry, true);
-                if (newItem && data)
-                    data->materializedItems.insert(newItem->GetGUID().GetCounter());
-                remaining -= stackSize;
+                if (data)
+                    data->isMaterializing = false;
+                handler->SendSysMessage("Abyssal Storage: Not enough bag space for reagents.");
+                return true;
             }
 
-            sAbyssalStorageMgr->WithdrawItem(accountId, reagentEntry, toWithdraw);
-            sAbyssalStorageMgr->SendItemUpdate(player, reagentEntry, sAbyssalStorageMgr->GetItemCount(accountId, reagentEntry));
+            Item* newItem = player->StoreNewItem(dest, r.entry, true);
+            if (newItem && data)
+                data->materializedItems.insert(newItem->GetGUID().GetCounter());
+
+            sAbyssalStorageMgr->WithdrawItem(accountId, r.entry, toWithdraw);
+            sAbyssalStorageMgr->SendItemUpdate(player, r.entry, sAbyssalStorageMgr->GetItemCount(accountId, r.entry));
         }
 
         if (data)

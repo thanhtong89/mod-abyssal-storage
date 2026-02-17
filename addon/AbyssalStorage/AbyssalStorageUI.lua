@@ -400,25 +400,44 @@ local function HookTradeSkill()
         local numReagents = GetTradeSkillNumReagents(id)
         local canCraftWithVault, maxCrafts = GetMaxCraftsWithVault(id)
 
-        -- Update reagent count displays to show vault amounts
+        -- Update reagent displays: show vault count as green label on top of icon
+        for i = 1, 8 do
+            local reagentFrame = _G["TradeSkillReagent" .. i]
+            if reagentFrame and reagentFrame.abyssalVaultLabel then
+                reagentFrame.abyssalVaultLabel:Hide()
+            end
+        end
+
         for i = 1, numReagents do
             local _, _, reagentCount, playerReagentCount = GetTradeSkillReagentInfo(id, i)
             local reagentLink = GetTradeSkillReagentItemLink(id, i)
             local reagentEntry = AbyssalStorage:EntryFromLink(reagentLink)
 
-            if reagentEntry then
+            local reagentFrame = _G["TradeSkillReagent" .. i]
+            if reagentEntry and reagentFrame then
                 local vaultCount = AbyssalStorage:GetItemCount(reagentEntry)
                 if vaultCount > 0 then
+                    -- Create or reuse the vault label on the icon
+                    if not reagentFrame.abyssalVaultLabel then
+                        local icon = _G["TradeSkillReagent" .. i .. "IconTexture"]
+                        local parent = icon and icon:GetParent() or reagentFrame
+                        local label = parent:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+                        label:SetPoint("TOP", icon or parent, "TOP", 0, -2)
+                        label:SetJustifyH("CENTER")
+                        reagentFrame.abyssalVaultLabel = label
+                    end
+
+                    local label = reagentFrame.abyssalVaultLabel
+                    local displayCount = vaultCount > 9999 and "9999+" or tostring(vaultCount)
+                    label:SetText(displayCount)
+                    label:SetTextColor(0.2, 1, 0.2)
+                    label:Show()
+
+                    -- Also fix the count color if vault covers the gap
                     local totalCount = playerReagentCount + vaultCount
                     local countLabel = _G["TradeSkillReagent" .. i .. "Count"]
-                    if countLabel then
-                        if totalCount >= reagentCount then
-                            countLabel:SetText(playerReagentCount .. "(+" .. vaultCount .. ")/" .. reagentCount)
-                            countLabel:SetTextColor(1, 1, 1)
-                        else
-                            countLabel:SetText(playerReagentCount .. "(+" .. vaultCount .. ")/" .. reagentCount)
-                            countLabel:SetTextColor(1, 0.2, 0.2)
-                        end
+                    if countLabel and totalCount >= reagentCount then
+                        countLabel:SetTextColor(1, 1, 1)
                     end
                 end
             end
