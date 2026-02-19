@@ -171,7 +171,7 @@ void AbyssalStorageMgr::SendAddonMessage(Player* player, std::string const& mess
     }
 
     // For SYNC messages, split by semicolons to create valid chunks
-    size_t prefixEnd = message.find(':', 5);
+    size_t prefixEnd = message.find(':');
     if (prefixEnd == std::string::npos)
     {
         SendOnePacket(player, ("ABYS\t" + message.substr(0, MAX_MSG_LEN - 5)));

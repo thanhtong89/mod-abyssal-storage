@@ -138,7 +138,8 @@ function AbyssalStorage:HandleUpdate(payload)
         else
             self.items[entry] = nil
         end
-        if self.UpdateUI then self:UpdateUI() end
+        -- Skip UI refresh during multi-packet SYNC to avoid flashing incomplete data
+        if not self._syncActive and self.UpdateUI then self:UpdateUI() end
     end
 end
 
@@ -147,7 +148,7 @@ function AbyssalStorage:HandleDelete(payload)
     local entry = tonumber(payload)
     if entry then
         self.items[entry] = nil
-        if self.UpdateUI then self:UpdateUI() end
+        if not self._syncActive and self.UpdateUI then self:UpdateUI() end
     end
 end
 

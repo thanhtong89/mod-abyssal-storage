@@ -284,6 +284,11 @@ function AbyssalStorage:UpdateUI()
     local maxScroll = math.max(0, totalRows - VISIBLE_ROWS)
     scrollBar:SetMinMaxValues(0, maxScroll)
 
+    -- Clamp scroll position so it doesn't point beyond the display list
+    if scrollBar:GetValue() > maxScroll then
+        scrollBar:SetValue(maxScroll)
+    end
+
     -- Item count display
     if not frame.itemCountText then
         frame.itemCountText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
