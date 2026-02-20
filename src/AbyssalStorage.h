@@ -46,6 +46,7 @@ public:
     std::unordered_map<uint32, uint32> GetAllItems(uint32 accountId);
 
     bool ShouldAutoStore(Player* player, ItemTemplate const* itemTemplate);
+    bool IsItemRequiredByActiveQuest(Player* player, uint32 itemId);
 
     // Messaging helpers
     void SendAddonMessage(Player* player, std::string const& message);

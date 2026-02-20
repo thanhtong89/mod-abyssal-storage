@@ -6,6 +6,7 @@
 #include "WorldSession.h"
 #include "Chat.h"
 #include "ObjectMgr.h"
+#include "QuestDef.h"
 #include "Log.h"
 
 AbyssalPlayerData* GetAbyssalData(Player* player)
@@ -124,6 +125,32 @@ std::unordered_map<uint32, uint32> AbyssalStorageMgr::GetAllItems(uint32 account
     return accIt->second;
 }
 
+bool AbyssalStorageMgr::IsItemRequiredByActiveQuest(Player* player, uint32 itemId)
+{
+    for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
+    {
+        uint32 questId = player->GetQuestSlotQuestId(i);
+        if (!questId)
+            continue;
+
+        QuestStatus status = player->GetQuestStatus(questId);
+        if (status != QUEST_STATUS_INCOMPLETE && status != QUEST_STATUS_COMPLETE)
+            continue;
+
+        Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
+        if (!quest)
+            continue;
+
+        for (uint8 j = 0; j < QUEST_ITEM_OBJECTIVES_COUNT; ++j)
+        {
+            if (quest->RequiredItemId[j] == itemId)
+                return true;
+        }
+    }
+
+    return false;
+}
+
 bool AbyssalStorageMgr::ShouldAutoStore(Player* player, ItemTemplate const* itemTemplate)
 {
     if (!itemTemplate)
@@ -132,7 +159,7 @@ bool AbyssalStorageMgr::ShouldAutoStore(Player* player, ItemTemplate const* item
     if (itemTemplate->Class != ITEM_CLASS_TRADE_GOODS && itemTemplate->Class != ITEM_CLASS_GEM)
         return false;
 
-    if (player->HasQuestForItem(itemTemplate->ItemId))
+    if (IsItemRequiredByActiveQuest(player, itemTemplate->ItemId))
         return false;
 
     return true;
