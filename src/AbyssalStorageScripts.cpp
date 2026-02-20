@@ -162,12 +162,18 @@ public:
         if (!sAbyssalStorageMgr->IsEnabled() || !player)
             return true;
 
+        AbyssalPlayerData* data = GetAbyssalData(player);
+
+        // Prevent infinite recursion: StoreNewItem -> ItemAddedQuestCheck ->
+        // CompleteQuest -> OnPlayerBeforeQuestComplete -> StoreNewItem ...
+        if (data && data->isMaterializing)
+            return true;
+
         Quest const* quest = sObjectMgr->GetQuestTemplate(questId);
         if (!quest)
             return true;
 
         uint32 accountId = player->GetSession()->GetAccountId();
-        AbyssalPlayerData* data = GetAbyssalData(player);
 
         if (data)
             data->isMaterializing = true;
