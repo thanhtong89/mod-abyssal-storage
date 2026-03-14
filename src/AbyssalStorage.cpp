@@ -125,8 +125,10 @@ std::unordered_map<uint32, uint32> AbyssalStorageMgr::GetAllItems(uint32 account
     return accIt->second;
 }
 
-bool AbyssalStorageMgr::IsItemRequiredByActiveQuest(Player* player, uint32 itemId)
+uint32 AbyssalStorageMgr::GetQuestReservedCount(Player* player, uint32 itemId)
 {
+    uint32 reserved = 0;
+
     for (uint8 i = 0; i < MAX_QUEST_LOG_SIZE; ++i)
     {
         uint32 questId = player->GetQuestSlotQuestId(i);
@@ -144,11 +146,17 @@ bool AbyssalStorageMgr::IsItemRequiredByActiveQuest(Player* player, uint32 itemI
         for (uint8 j = 0; j < QUEST_ITEM_OBJECTIVES_COUNT; ++j)
         {
             if (quest->RequiredItemId[j] == itemId)
-                return true;
+                reserved += quest->RequiredItemCount[j];
         }
     }
 
-    return false;
+    return reserved;
+}
+
+bool AbyssalStorageMgr::IsItemRequiredByActiveQuest(Player* player, uint32 itemId)
+{
+    uint32 reserved = GetQuestReservedCount(player, itemId);
+    return reserved > 0 && player->GetItemCount(itemId) <= reserved;
 }
 
 bool AbyssalStorageMgr::ShouldAutoStore(Player* player, ItemTemplate const* itemTemplate)

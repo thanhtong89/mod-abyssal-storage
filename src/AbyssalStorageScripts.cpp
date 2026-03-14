@@ -123,7 +123,8 @@ public:
             return;
 
         // Defer the deposit — destroying items inside this hook crashes the server
-        data->pendingDeposits.push_back({ item->GetEntry(), item->GetCount() });
+        // Use count (newly added) not item->GetCount() (merged stack size)
+        data->pendingDeposits.push_back({ item->GetEntry(), count });
     }
 
     void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
@@ -148,6 +149,13 @@ public:
             uint32 toDeposit = std::min(dep.count, playerHas);
             if (toDeposit == 0)
                 continue;
+
+            // Never deposit below the quest-required threshold — guards against
+            // timing races where item->GetCount() or quest status was stale when queued
+            uint32 questReserved = sAbyssalStorageMgr->GetQuestReservedCount(player, dep.itemEntry);
+            if (playerHas <= questReserved)
+                continue;
+            toDeposit = std::min(toDeposit, playerHas - questReserved);
 
             player->DestroyItemCount(dep.itemEntry, toDeposit, true);
             sAbyssalStorageMgr->DepositItem(accountId, dep.itemEntry, toDeposit);

@@ -47,6 +47,7 @@ public:
 
     bool ShouldAutoStore(Player* player, ItemTemplate const* itemTemplate);
     bool IsItemRequiredByActiveQuest(Player* player, uint32 itemId);
+    uint32 GetQuestReservedCount(Player* player, uint32 itemId);
 
     // Messaging helpers
     void SendAddonMessage(Player* player, std::string const& message);
