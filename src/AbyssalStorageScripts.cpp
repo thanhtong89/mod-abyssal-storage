@@ -1,4 +1,5 @@
 #include "AbyssalStorage.h"
+#include "AccountMgr.h"
 #include "Chat.h"
 #include "ChatCommand.h"
 #include "Config.h"
@@ -14,6 +15,24 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include <sstream>
+
+// Returns true if the player belongs to a random playerbot account (username prefix "rndbot")
+static bool IsRandomBot(Player* player)
+{
+    if (!player)
+        return false;
+    uint32 accountId = player->GetSession()->GetAccountId();
+    std::string username;
+    if (!sAccountMgr->GetName(accountId, username))
+        return false;
+    // Case-insensitive prefix check
+    if (username.size() < 6)
+        return false;
+    std::string prefix = username.substr(0, 6);
+    for (char& c : prefix)
+        c = std::tolower(static_cast<unsigned char>(c));
+    return prefix == "rndbot";
+}
 
 // Build a clickable item link like "|cff1eff00|Hitem:2589:0:0:0:0:0:0:0:0:0|h[Linen Cloth]|h|r"
 static std::string BuildItemLink(uint32 itemEntry)
@@ -65,6 +84,9 @@ public:
         if (!sAbyssalStorageMgr->IsEnabled())
             return;
 
+        if (IsRandomBot(player))
+            return;
+
         uint32 accountId = player->GetSession()->GetAccountId();
         sAbyssalStorageMgr->LoadAccountData(accountId);
         sAbyssalStorageMgr->SendFullSync(player);
@@ -73,6 +95,9 @@ public:
     void OnPlayerLogout(Player* player) override
     {
         if (!sAbyssalStorageMgr->IsEnabled())
+            return;
+
+        if (IsRandomBot(player))
             return;
 
         uint32 accountId = player->GetSession()->GetAccountId();
@@ -106,6 +131,9 @@ public:
         if (!sAbyssalStorageMgr->IsEnabled() || !player || !item)
             return;
 
+        if (IsRandomBot(player))
+            return;
+
         AbyssalPlayerData* data = GetAbyssalData(player);
         if (!data || !data->autoStoreEnabled)
             return;
@@ -130,6 +158,9 @@ public:
     void OnPlayerUpdate(Player* player, uint32 /*p_time*/) override
     {
         if (!sAbyssalStorageMgr->IsEnabled() || !player)
+            return;
+
+        if (IsRandomBot(player))
             return;
 
         AbyssalPlayerData* data = GetAbyssalData(player);
@@ -168,6 +199,9 @@ public:
     bool OnPlayerBeforeQuestComplete(Player* player, uint32 questId) override
     {
         if (!sAbyssalStorageMgr->IsEnabled() || !player)
+            return true;
+
+        if (IsRandomBot(player))
             return true;
 
         AbyssalPlayerData* data = GetAbyssalData(player);
@@ -252,6 +286,10 @@ public:
             return;
 
         Player* player = caster->ToPlayer();
+
+        if (IsRandomBot(player))
+            return;
+
         SpellInfo const* spellInfo = spell->GetSpellInfo();
 
         // Check if this spell uses reagents
@@ -335,6 +373,10 @@ public:
             return;
 
         Player* player = caster->ToPlayer();
+
+        if (IsRandomBot(player))
+            return;
+
         AbyssalPlayerData* data = GetAbyssalData(player);
         if (!data || data->materializedItems.empty())
             return;
