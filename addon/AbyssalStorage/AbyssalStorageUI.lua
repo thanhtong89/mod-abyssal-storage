@@ -1,13 +1,16 @@
 -- Abyssal Storage - UI Implementation
 
-local ITEMS_PER_ROW = 10
+local ITEMS_PER_ROW = 12
 local VISIBLE_ROWS = 8
 local CELL_SIZE = 37
-local CELL_SPACING = 2
-local FRAME_PADDING = 10
+local CELL_SPACING = 3
+local FRAME_WIDTH = 520
+local FRAME_HEIGHT = 480
+local FRAME_PADDING = 16
 local SEARCH_HEIGHT = 24
-local TITLE_HEIGHT = 24
+local HEADER_HEIGHT = 32
 local SCROLL_WIDTH = 16
+local SCROLL_OUTSET = 19
 
 -- ============================================================================
 -- Sorted/Filtered Item List
@@ -15,18 +18,48 @@ local SCROLL_WIDTH = 16
 
 local displayList = {} -- { {entry=N, count=N, name="...", icon="..."}, ... }
 local searchFilter = ""
+local selectedCategory = "All"
+
+local CATEGORY_ORDER = {
+    "All",
+    "Cloth",
+    "Leather",
+    "Metal & Stone",
+    "Herbs",
+    "Elemental",
+    "Enchanting",
+    "Other",
+}
+
+local function GetItemCategory(entry)
+    local _, _, _, _, _, itemType, itemSubType = GetItemInfo(entry)
+    if itemType ~= "Trade Goods" then
+        return "Other"
+    end
+
+    itemSubType = itemSubType or ""
+    if itemSubType == "Cloth" then return "Cloth" end
+    if itemSubType == "Leather" then return "Leather" end
+    if itemSubType == "Metal & Stone" then return "Metal & Stone" end
+    if itemSubType == "Herb" then return "Herbs" end
+    if itemSubType == "Elemental" then return "Elemental" end
+    if itemSubType == "Enchanting" then return "Enchanting" end
+    return "Other"
+end
 
 local function BuildDisplayList()
     wipe(displayList)
     for entry, count in pairs(AbyssalStorage.items) do
         local name, _, _, _, _, _, _, _, _, icon = GetItemInfo(entry)
+        local category = GetItemCategory(entry)
+        local categoryMatches = selectedCategory == "All" or category == selectedCategory
         if name then
-            if searchFilter == "" or name:lower():find(searchFilter:lower(), 1, true) then
+            if categoryMatches and (searchFilter == "" or name:lower():find(searchFilter:lower(), 1, true)) then
                 table.insert(displayList, { entry = entry, count = count, name = name, icon = icon })
             end
         else
             -- Item not in client cache yet, show entry ID
-            if searchFilter == "" then
+            if categoryMatches and searchFilter == "" then
                 table.insert(displayList, { entry = entry, count = count, name = "Item #" .. entry, icon = "Interface\\Icons\\INV_Misc_QuestionMark" })
             end
         end
@@ -38,11 +71,8 @@ end
 -- Main Frame
 -- ============================================================================
 
-local frameWidth = FRAME_PADDING * 2 + ITEMS_PER_ROW * (CELL_SIZE + CELL_SPACING) + SCROLL_WIDTH
-local frameHeight = FRAME_PADDING * 2 + TITLE_HEIGHT + SEARCH_HEIGHT + 8 + VISIBLE_ROWS * (CELL_SIZE + CELL_SPACING)
-
 local frame = CreateFrame("Frame", "AbyssalStorageFrame", UIParent)
-frame:SetSize(frameWidth, frameHeight)
+frame:SetSize(FRAME_WIDTH, FRAME_HEIGHT)
 frame:SetPoint("CENTER")
 frame:SetMovable(true)
 frame:EnableMouse(true)
@@ -52,22 +82,26 @@ frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
 frame:SetClampedToScreen(true)
 frame:Hide()
 
--- Backdrop
-frame:SetBackdrop({
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 8, right = 8, top = 8, bottom = 8 }
-})
-frame:SetBackdropColor(0, 0, 0, 0.9)
+-- Dark panel and the same gear-manager header used by MyAutoVendor.
+local bg = frame:CreateTexture(nil, "BACKGROUND")
+bg:SetAllPoints()
+bg:SetTexture("Interface\\Buttons\\WHITE8X8")
+bg:SetVertexColor(0.07, 0.07, 0.07, 0.96)
+
+local header = frame:CreateTexture(nil, "ARTWORK")
+header:SetPoint("TOPLEFT")
+header:SetPoint("TOPRIGHT")
+header:SetHeight(HEADER_HEIGHT)
+header:SetTexture("Interface\\PaperDollInfoFrame\\UI-GearManager-Title-Background")
 
 -- ESC to close
 tinsert(UISpecialFrames, "AbyssalStorageFrame")
 
 -- Title
-local title = frame:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-title:SetPoint("TOP", frame, "TOP", 0, -FRAME_PADDING)
+local title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+title:SetPoint("TOP", frame, "TOP", 0, -6)
 title:SetText("Abyssal Storage")
+title:SetTextColor(1, 0.85, 0)
 
 -- Close button
 local closeBtn = CreateFrame("Button", nil, frame, "UIPanelCloseButton")
@@ -76,8 +110,15 @@ closeBtn:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -2, -2)
 -- Deposit All button
 local depositBtn = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
 depositBtn:SetSize(80, 22)
-depositBtn:SetPoint("RIGHT", closeBtn, "LEFT", -2, 0)
+depositBtn:SetPoint("TOPRIGHT", closeBtn, "TOPLEFT", -4, -3)
 depositBtn:SetText("Deposit All")
+depositBtn:SetNormalTexture("Interface\\Buttons\\WHITE8X8")
+depositBtn:SetPushedTexture("Interface\\Buttons\\WHITE8X8")
+depositBtn:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
+depositBtn:GetNormalTexture():SetVertexColor(0.12, 0.12, 0.12, 0.9)
+depositBtn:GetPushedTexture():SetVertexColor(0.18, 0.18, 0.18, 1)
+depositBtn:GetHighlightTexture():SetVertexColor(0.25, 0.25, 0.25, 0.9)
+depositBtn:GetFontString():SetTextColor(1, 0.85, 0)
 depositBtn:SetScript("OnClick", function()
     AbyssalStorage:Deposit()
 end)
@@ -87,8 +128,8 @@ end)
 -- ============================================================================
 
 local searchBox = CreateFrame("EditBox", "AbyssalStorageSearchBox", frame, "InputBoxTemplate")
-searchBox:SetSize(frameWidth - FRAME_PADDING * 2 - 40, SEARCH_HEIGHT)
-searchBox:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PADDING + 20, -(FRAME_PADDING + TITLE_HEIGHT + 4))
+searchBox:SetSize(FRAME_WIDTH - FRAME_PADDING * 2 - 52, SEARCH_HEIGHT)
+searchBox:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PADDING + 52, -(HEADER_HEIGHT + 12))
 searchBox:SetAutoFocus(false)
 searchBox:SetScript("OnTextChanged", function(self)
     searchFilter = self:GetText() or ""
@@ -101,20 +142,46 @@ end)
 local searchLabel = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 searchLabel:SetPoint("RIGHT", searchBox, "LEFT", -4, 0)
 searchLabel:SetText("Search:")
+searchLabel:SetTextColor(1, 0.85, 0)
+
+-- Category filters, matching ReagentBankUI's category-first workflow.
+local categoryButtons = {}
+local categoryButtonWidth = 114
+local categoryButtonHeight = 22
+local categoryButtonGap = 6
+for index, categoryName in ipairs(CATEGORY_ORDER) do
+    local categoryButton = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
+    local categoryIndex = index - 1
+    local categoryColumn = categoryIndex % 4
+    local categoryRow = math.floor(categoryIndex / 4)
+    categoryButton:SetSize(categoryButtonWidth, categoryButtonHeight)
+    categoryButton:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PADDING + categoryColumn * (categoryButtonWidth + categoryButtonGap), -(HEADER_HEIGHT + 60 + categoryRow * (categoryButtonHeight + 4)))
+    categoryButton:SetText(categoryName)
+    categoryButton:SetNormalTexture("Interface\\Buttons\\WHITE8X8")
+    categoryButton:SetPushedTexture("Interface\\Buttons\\WHITE8X8")
+    categoryButton:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
+    categoryButton:GetPushedTexture():SetVertexColor(0.18, 0.18, 0.18, 1)
+    categoryButton:GetHighlightTexture():SetVertexColor(0.25, 0.25, 0.25, 0.9)
+    categoryButton:SetScript("OnClick", function()
+        selectedCategory = categoryName
+        AbyssalStorage:UpdateUI()
+    end)
+    categoryButtons[categoryName] = categoryButton
+end
 
 -- ============================================================================
 -- Scroll Frame + Grid
 -- ============================================================================
 
-local gridTop = FRAME_PADDING + TITLE_HEIGHT + SEARCH_HEIGHT + 8
+local gridTop = HEADER_HEIGHT + 128
 local gridArea = CreateFrame("Frame", nil, frame)
 gridArea:SetPoint("TOPLEFT", frame, "TOPLEFT", FRAME_PADDING, -gridTop)
 gridArea:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(FRAME_PADDING + SCROLL_WIDTH), FRAME_PADDING)
 
 -- Scroll bar (plain Slider, no template)
 local scrollBar = CreateFrame("Slider", "AbyssalStorageScrollBar", frame)
-scrollBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -(FRAME_PADDING + 2), -(gridTop + 16))
-scrollBar:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(FRAME_PADDING + 2), FRAME_PADDING + 16)
+scrollBar:SetPoint("TOPRIGHT", frame, "TOPRIGHT", -(FRAME_PADDING + 2) + SCROLL_OUTSET, -(gridTop + 16))
+scrollBar:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -(FRAME_PADDING + 2) + SCROLL_OUTSET, FRAME_PADDING + 16)
 scrollBar:SetWidth(SCROLL_WIDTH)
 scrollBar:SetMinMaxValues(0, 0)
 scrollBar:SetValueStep(1)
@@ -123,10 +190,12 @@ scrollBar:SetOrientation("VERTICAL")
 
 local scrollBg = scrollBar:CreateTexture(nil, "BACKGROUND")
 scrollBg:SetAllPoints()
-scrollBg:SetTexture(0, 0, 0, 0.3)
+scrollBg:SetTexture("Interface\\Buttons\\WHITE8X8")
+scrollBg:SetVertexColor(0, 0, 0, 0.3)
 
 local scrollThumb = scrollBar:CreateTexture(nil, "OVERLAY")
-scrollThumb:SetTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+scrollThumb:SetTexture("Interface\\Buttons\\WHITE8X8")
+scrollThumb:SetVertexColor(1, 0.85, 0, 0.75)
 scrollThumb:SetSize(SCROLL_WIDTH + 4, 24)
 scrollBar:SetThumbTexture(scrollThumb)
 
@@ -134,11 +203,22 @@ scrollBar:SetScript("OnValueChanged", function(self, value)
     AbyssalStorage:UpdateGrid()
 end)
 
-frame:EnableMouseWheel(true)
-frame:SetScript("OnMouseWheel", function(self, delta)
+local function ScrollBy(delta)
     local cur = scrollBar:GetValue()
-    scrollBar:SetValue(cur - delta)
-end)
+    local minValue, maxValue = scrollBar:GetMinMaxValues()
+    scrollBar:SetValue(math.max(minValue, math.min(maxValue, cur - delta)))
+end
+
+local function HandleMouseWheel(_, delta)
+    ScrollBy(delta)
+end
+
+frame:EnableMouseWheel(true)
+frame:SetScript("OnMouseWheel", HandleMouseWheel)
+gridArea:EnableMouseWheel(true)
+gridArea:SetScript("OnMouseWheel", HandleMouseWheel)
+scrollBar:EnableMouseWheel(true)
+scrollBar:SetScript("OnMouseWheel", HandleMouseWheel)
 
 -- ============================================================================
 -- Grid Cells
@@ -163,19 +243,20 @@ local function CreateCell(index)
     -- Count text
     local countText = cell:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
     countText:SetPoint("BOTTOMRIGHT", cell, "BOTTOMRIGHT", -2, 2)
+    countText:SetTextColor(1, 0.85, 0)
     cell.countText = countText
 
     -- Border (highlight)
     local highlight = cell:CreateTexture(nil, "HIGHLIGHT")
     highlight:SetAllPoints()
-    highlight:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
-    highlight:SetBlendMode("ADD")
-    highlight:SetAlpha(0.3)
+    highlight:SetTexture("Interface\\Buttons\\WHITE8X8")
+    highlight:SetVertexColor(1, 0.85, 0, 0.18)
 
     -- Background
     local bg = cell:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
-    bg:SetTexture(0, 0, 0, 0.5)
+    bg:SetTexture("Interface\\Buttons\\WHITE8X8")
+    bg:SetVertexColor(0, 0, 0, 0.32)
     cell.bg = bg
 
     -- Tooltip
@@ -183,6 +264,11 @@ local function CreateCell(index)
         if self.itemEntry then
             GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
             GameTooltip:SetHyperlink("item:" .. self.itemEntry)
+            local bags = GetItemCount and (GetItemCount(self.itemEntry, false) or 0) or 0
+            local stored = self.itemCount or 0
+            GameTooltip:AddDoubleLine("Bags", tostring(bags), 0.78, 0.82, 0.88, 1, 1, 1)
+            GameTooltip:AddDoubleLine("Abyssal Storage", tostring(stored), 0.78, 0.82, 0.88, 0.2, 1, 0.6)
+            GameTooltip:AddDoubleLine("Total", tostring(bags + stored), 1, 0.85, 0, 1, 0.85, 0)
             GameTooltip:Show()
         end
     end)
@@ -279,6 +365,12 @@ function AbyssalStorage:UpdateUI()
     if not AbyssalStorageFrame:IsShown() then return end
 
     BuildDisplayList()
+
+    for categoryName, categoryButton in pairs(categoryButtons) do
+        local active = categoryName == selectedCategory
+        categoryButton:GetNormalTexture():SetVertexColor(active and 0.55 or 0.12, active and 0.40 or 0.12, active and 0.10 or 0.12, 0.95)
+        categoryButton:GetFontString():SetTextColor(active and 1 or 0.85, active and 0.85 or 0.85, active and 0.35 or 0.85)
+    end
 
     local totalRows = math.ceil(#displayList / ITEMS_PER_ROW)
     local maxScroll = math.max(0, totalRows - VISIBLE_ROWS)
